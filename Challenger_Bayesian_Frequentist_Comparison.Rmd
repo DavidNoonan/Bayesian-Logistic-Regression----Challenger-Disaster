@@ -1,0 +1,46 @@
+---
+title: "Logistic Regression -- The Challenger Disaster"
+subtitle: "Bayesian / Frequentist Comparison"
+author: "David Noonan"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+---
+
+The challenger disaster dataset is great for demonstrating logistic regression. Here I'm going to run frequentist and bayesian versions of a logistic regression model, and compare/contrast. Firstly, we need to load the dataset.  I found it conveniently in the DAAG package, so let's load it up:
+```{r, message=FALSE, warning=FALSE, paged.print=FALSE}
+#DAAG library contains the challenger dataset
+library(DAAG)
+#load the challenger "o-rings" dataset
+chall <- orings
+str(chall)
+```
+
+We have essentially four variables here:  "Temperature" -- the air temperature at "launch" (experimental launch simulation, I believe), "Blowby" -- when the o-ring leaks fuel, and "Erosion" -- where the o-ring erodes, and "Total" -- a combination of "Erosion" and "Blowby".  We are particularly interested in temperature, which we'll use to explain the outcome, and we are also interested in "Total", which combines both types of o-ring failures that cause the shuttle to blow up. Below is a chart of "Total" by temperature:
+
+```{r, fig.margin = TRUE}
+#plot failure by temperature
+library(ggplot2)
+ggplot() +
+  geom_col(data = chall,
+           mapping = aes(x = Temperature,
+                         y = Total)
+  ) +
+  ggtitle(label = "O-ring Failure by Temperature") +
+  xlab("Temperature (f)") +
+  ylab("Failure")
+```
+ 
+ 
+We can already see what looks like a trend:  Lower temperatures cause more failures. Since we're not interested in the number of o-ring failures, or the type, we create a new variable, "Failure", which indicates the presence or absence of failure: 
+
+```{r}
+library(tidyverse)
+#Create failure variable, 1 = failure, 0 = no failure
+challenger <- orings %>% mutate(failure = ifelse(test = Total > 0,
+                                            yes =  1,
+                                            no =  0))
+```
+
