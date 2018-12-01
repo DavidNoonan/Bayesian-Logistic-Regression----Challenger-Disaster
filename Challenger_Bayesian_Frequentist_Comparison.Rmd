@@ -9,24 +9,34 @@ output:
     highlight: github
 ---
 
-The challenger disaster dataset is great for demonstrating logistic regression. Here I'm going to run frequentist and bayesian versions of a logistic regression model, and compare/contrast. Firstly, we need to load the dataset.  I found it conveniently in the DAAG package, so let's load it up:
+The challenger disaster dataset is a classic tool for teaching demonstrating logistic regression. Here I'm going to compare results from frequentist and bayesian logistic regressions model. Firstly, we need to load the dataset.  I found it conveniently in the DAAG package, so let's load it up:
 ```{r, message=FALSE, warning=FALSE, paged.print=FALSE}
-#DAAG library contains the challenger dataset
-library(DAAG)
-#load the challenger "o-rings" dataset
+library(DAAG) # DAAG library contains the challenger dataset
+library(tidyverse)
+library(rstan)
+library(bayesplot)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+Sys.setenv(USE_CXX14 = 1)
+
+# load the challenger "o-rings" dataset
 chall <- orings
 str(chall)
 ```
 
-We have essentially four variables here:  "Temperature" -- the air temperature at "launch" (experimental launch simulation, I believe), "Blowby" -- when the o-ring leaks fuel, and "Erosion" -- where the o-ring erodes, and "Total" -- a combination of "Erosion" and "Blowby".  We are particularly interested in temperature, which we'll use to explain the outcome, and we are also interested in "Total", which combines both types of o-ring failures that cause the shuttle to blow up. Below is a chart of "Total" by temperature:
+We have essentially four variables here:  "Temperature" -- the air temperature at "launch" (experimental launch simulation, I believe), "Blowby" -- when the o-ring leaks fuel, and "Erosion" -- where the o-ring erodes, and "Total" -- a combination of "Erosion" and "Blowby".  We are interested in temperature, which we'll use to explain the outcome, and we are also "Total", which combines both types of o-ring failures that cause the shuttle to fail or explode. Below is a chart of "Total" by temperature:
 
 ```{r, fig.margin = TRUE}
-#plot failure by temperature
-library(ggplot2)
+# plot failures by temperature
+
 ggplot() +
-  geom_col(data = chall,
-           mapping = aes(x = Temperature,
-                         y = Total)
+  geom_col(
+    data = chall,
+    mapping = aes(
+      x = Temperature,
+      y = Total
+    )
   ) +
   ggtitle(label = "O-ring Failure by Temperature") +
   xlab("Temperature (f)") +
@@ -34,13 +44,216 @@ ggplot() +
 ```
  
  
-We can already see what looks like a trend:  Lower temperatures cause more failures. Since we're not interested in the number of o-ring failures, or the type, we create a new variable, "Failure", which indicates the presence or absence of failure: 
+We can already see what looks like a trend:  Lower temperatures cause more failures. For now, we'll pay attention to the presence of failure, rather than the number of o-ring failures, or the type.  Here we create a new variable, "Failure", which indicates the presence or absence of failure: 
 
 ```{r}
-library(tidyverse)
-#Create failure variable, 1 = failure, 0 = no failure
-challenger <- orings %>% mutate(failure = ifelse(test = Total > 0,
-                                            yes =  1,
-                                            no =  0))
+
+# Create failure variable, 1 = failure, 0 = no failure
+challenger <- orings %>% mutate(Failure = ifelse(test = Total > 0,
+  yes = 1,
+  no = 0
+))
+
+# plot failure by temperature
+ggplot() +
+  geom_point(
+    data = challenger,
+    mapping = aes(
+      x = Temperature,
+      y = Failure
+    )
+  ) +
+  ggtitle(label = "O-ring Failure by Temperature") +
+  xlab("Temperature (f)") +
+  ylab("Failure")
 ```
+
+Now we'll do what the textbooks do: build a logistic regression model, and predict the outcomes for low-temperature launches!  We begin by testing our model setup by generating fake data with known parameters. We'll test the setup by estimating the parameters with our model. If it estimates the parameters correctly, it tells us that our model "works" as far as coding is concerned.
+
+Below we simulate data from the model $$Failure \thicksim Bernoulli(\pi)$$ Where $\pi$ depends on temperature with the relationship $$\pi = \frac{1}{(1 + \exp(-(\alpha + \beta*Temperature))}$$  I'll choose $\alpha = 20$ and $\beta = -0.4$.
+
+```{r}
+# Create some fake data - logistic regression
+set.seed(88)
+N <- 1000
+alpha <- 20
+beta <- -.4
+
+fake_temperature <- runif(N, min = 25, max = 100) # generate random temperatures between 25 and 100
+pi <- 1 / (1 + exp(-(alpha + beta * fake_temperature))) # generate failure probabilities from the temperatures
+failure <- rbinom(N, 1, pi) # simulate Bernoulli trials from the generated temperatures
+
+fake_data <- data.frame(fake_temperature = fake_temperature, pi = pi, failure = failure)
+
+ggplot(data = fake_data, aes(x = fake_temperature, y = failure)) +
+  geom_point() +
+  labs(x = "Fake Temperature", y = "Failure")
+```
+
+Looks reasonable. Here, the risk of failure increases sharply as temperatures decrease below 60, as shown below:
+
+```{r}
+ggplot(data = fake_data, aes(x = fake_temperature, y = pi)) +
+  geom_point() +
+  labs(x = "Fake Temperature", y = expression(Fake~pi))
+```
+
+Now let's fit a model in stan. I'll use very weak priors, because I have essentially zero prior knowledge about the effect of temperature on o-ring failure. Next, the model we are specifying is: $$Failure \thicksim Bernoulli(\pi) \\
+\pi = \frac{1}{(1 + \exp(-(\alpha + \beta*Temperature))} \\
+\alpha \thicksim \mathcal{N}(\mu_{\alpha}, \sigma_{\alpha}) \\
+\beta \thicksim \mathcal{N}(\mu_{\beta}, \sigma_{\beta})$$I'll write the stan model as a string:
+
+```{r}
+stan_model_string <- "data {
+  int<lower = 1> N;
+  vector[N] fake_temperature;
+  int<lower = 0, upper = 1> failure[N];
+}
+parameters {
+  real alpha;
+  real beta;
+}
+model {
+  failure ~ bernoulli_logit(alpha + beta*fake_temperature);
+  alpha ~ normal(0, 100);
+  beta ~ normal(0, 10);
+}
+generated quantities {
+  //vector[N_test] y_test;
+  //for(i in 1:N_test) {
+   // failure_test[i] = bernoulli_rng(inv_logit(alpha + beta*temperature_test[i]));
+  }
+}"
+```
+
+Then we format the data into a list:
+
+```{r}
+fake_stan_data <- list(failure = fake_data$failure, fake_temperature = fake_data$fake_temperature, N = nrow(fake_data))
+```
+
+
+```{r, cache = TRUE}
+# Recover parameters with stan
+fit1 <- stan(file = 'challenger.stan',
+            data = fake_stan_data,
+            chains = 3, iter = 1000,)
+```
+Did the mcmc sampling work?  Let's check the trace plot:
+
+```{r}
+traceplot(fit1)
+```
+
+Looks like it converges. Now the estimates:
+
+
+```{r message=FALSE, warning=FALSE}
+plot(fit1, pars = c("alpha", "beta"))
+```
+
+```{r}
+print(fit1)
+```
+
+The means for our alpha and beta parameters are reasonable! Let's do a quick plot look at what our model says about pi relating to temperature.  We'll put in fake temperature data, and see what distributions for pi come out of it.
+
+
+```{r}
+#From https://stats.stackexchange.com/questions/252988/highest-density-interval-in-stan
+
+HDIofMCMC = function( sampleVec , credMass=0.95 ) {
+  # Computes highest density interval from a sample of representative values,
+  #   estimated as shortest credible interval.
+  # Arguments:
+  #   sampleVec
+  #     is a vector of representative values from a probability distribution.
+  #   credMass
+  #     is a scalar between 0 and 1, indicating the mass within the credible
+  #     interval that is to be estimated.
+  # Value:
+  #   HDIlim is a vector containing the limits of the HDI
+  sortedPts = sort( sampleVec )
+  ciIdxInc = ceiling( credMass * length( sortedPts ) )
+  nCIs = length( sortedPts ) - ciIdxInc
+  ciWidth = rep( 0 , nCIs )
+  for ( i in 1:nCIs ) {
+    ciWidth[ i ] = sortedPts[ i + ciIdxInc ] - sortedPts[ i ]
+  }
+  HDImin = sortedPts[ which.min( ciWidth ) ]
+  HDImax = sortedPts[ which.min( ciWidth ) + ciIdxInc ]
+  HDIlim = c( HDImin , HDImax )
+  return( HDIlim )
+}
+```
+
+
+```{r}
+#gather samples from the fit1 model
+fit1_samples <- rstan::extract(fit1)
+
+#extract alpha and beta posterior samples
+fit1_alpha_posterior <- fit1_samples$alpha
+fit1_beta_posterior <- fit1_samples$beta
+
+#generate fake temperature data
+fake_temps <- seq(20, 120, by = .5) #runif(n = 1000, min = 0, max = 130)
+
+#function to generate samples of pi
+gen_pi <- function(temperature) {
+  logit_pi_sample <- sample(x = fit1_alpha_posterior, size = 1, replace = TRUE) + sample(x = fit1_beta_posterior, size = 1, replace = TRUE)*temperature
+  pi_sample <- 1/(1 + exp(-logit_pi_sample))
+  return(pi_sample)
+}
+
+#function to reapeat pi generation 1000 times
+gen_pi_1000 <- function(temperature) {
+  as.list(rep(temperature, 1000)) %>% map_dbl(gen_pi) %>% unlist()
+}
+
+#create list of 1000 samples for each temperature
+combined_pi <- as.list(fake_temps) %>%
+  map(gen_pi_1000)
+
+
+#function to take the list of pi samples, generate 95% and 50% HDIs, and store them in a data frame.
+calculate_50_95_hdi <- function(list_element, temperature) {
+hdi_test_65 <- list_element %>% HDIofMCMC(credMass = .65)
+hdi_test_95 <- list_element %>% HDIofMCMC(credMass = .95)
+hdi_test_99 <- list_element %>% HDIofMCMC(credMass = .99)
+
+HDI_data_frame <- data.frame(temp = rep(temperature, 3, ), prob = c(.65, .95, .99), lower = c(hdi_test_65[1], hdi_test_95[1], hdi_test_99[1]), upper = c(hdi_test_65[2], hdi_test_95[2], hdi_test_99[2]))
+
+return(HDI_data_frame)
+}
+
+
+#apply hdi function to pi samples, combine to a dataframe
+pi_hdi <- purrr::map2(combined_pi, as.list(fake_temps), calculate_50_95_hdi) %>% rbind_list()
+
+
+
+pi_hdi %>%
+  ungroup %>% 
+  mutate(prob_fac = factor(prob),
+         prob_fac = forcats::fct_reorder(prob_fac, prob, .desc = TRUE)) %>%
+  ggplot(aes(x = temp, y = upper)) + 
+  #geom_point() + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = prob_fac)) + 
+  scale_fill_brewer(palette = "Greens", direction = -1) + 
+  coord_cartesian(ylim = c(-.1, 1.1), xlim = c(25, 90)) + 
+  #geom_line() + 
+ geom_point(aes(x = fake_temperature, y = pi), data = fake_data) + 
+  labs(title = "Predicted Probability of O-Ring Failure",
+       x = "Temperature",
+       y = expression(pi))
+
+```
+
+
+
+
+
+
+
 
